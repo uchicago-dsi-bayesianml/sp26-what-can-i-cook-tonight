@@ -1,0 +1,250 @@
+# 🍳 What Can I Cook Tonight?
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-LDA-F7931E?logo=scikitlearn&logoColor=white)
+![YOLOv5](https://img.shields.io/badge/YOLOv5-PyTorch-EE4C2C?logo=pytorch&logoColor=white)
+![Gradio](https://img.shields.io/badge/demo-Gradio-F97316?logo=gradio&logoColor=white)
+![Recipes](https://img.shields.io/badge/corpus-53%2C573%20recipes-success)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+Snap a photo of what's in your fridge and get the **recipes you can actually make tonight** — ranked by a Bayesian flavor model that also tells you how confident it is.
+
+Bayesian Methods Final Project — by **Qixin Cui**, **Kevin Fan**, **Yizhuo Li**, **Elaine Wang**, and **Zhetao Zhang** (University of Chicago).
+
+![Demo](assets/demo.png)
+
+> *Upload a fridge photo → the detector spots the ingredients → the recommender returns ranked recipes, each with its full ingredient list and what you're still missing.*
+
+---
+
+# 📌 Overview
+
+## Features
+
+- 📷 **Photo → ingredients** — a fine-tuned YOLOv5 detector (95 ingredient classes) reads a fridge or counter photo.
+- 🧠 **Recommendations with confidence** — a Bayesian flavor model ranks recipes *and* reports how sure it is.
+- 🧾 **The whole recipe at a glance** — every suggestion lists all ingredients and flags the ones you're missing.
+- 🥗 **Real-life filters** — vegetarian / vegan, "must use this", and a diversity dial so you don't get five near-identical dishes.
+- 📚 **53,573 real recipes** — cleaned from the public Food.com dataset.
+
+## Architecture
+
+Three stages, one entry point: a photo goes in, ranked recipes come out.
+
+```mermaid
+flowchart LR
+    P["photo of your<br/>ingredients"] --> Y
+    subgraph Y["2 · yolo — detect"]
+      y1["YOLOv5 detector<br/>label → ingredient"]
+    end
+    subgraph M["3 · model — recommend"]
+      m1["Bayesian LDA<br/>flavor model"]
+    end
+    subgraph D["1 · data"]
+      d1["53,573 cleaned<br/>Food.com recipes"]
+    end
+    Y --> M --> R["ranked recipes<br/>+ what you're missing"]
+    D -. corpus .-> M
+```
+
+| Stage | Folder | What it does | Tech |
+|-------|--------|--------------|------|
+| 1 · Data | `data/` | Download and clean the Food.com corpus → `recipes_clean.csv` | pandas · kagglehub |
+| 2 · Detect | `yolo/` | Spot ingredients in a photo, map labels to the recipe vocabulary | YOLOv5 · PyTorch · OpenCV · RapidFuzz |
+| 3 · Recommend | `model/` | Rank recipes with a Bayesian flavor model | scikit-learn · NumPy · SciPy |
+| — | `app.py` · `run_pipeline.py` | Web UI and CLI over the same engine | Gradio |
+
+---
+
+# 🍳 How it works
+
+## The idea
+
+You open the fridge, see a handful of ingredients, and wonder what you can actually cook tonight. We wanted an answer that only suggests dishes you can **mostly make right now** — and that is **honest about how confident it is**.
+
+Most recipe recommenders assume you already know what you have. We flip that: snap a photo, detect what's there, and let the model figure out what fits. The challenge is that everything is uncertain — detection is imperfect, your pantry is incomplete, ratings are noisy. That's exactly what Bayesian methods are built for.
+
+The trick is to treat cooking like language: a **recipe is a document**, an **ingredient is a word**, and a **cuisine or flavor is a hidden theme**. LDA discovers those flavor themes on its own from 53,573 real recipes — one theme leans on olive oil, basil and parmesan; another on flour, sugar and eggs. Your ingredients tell us which theme fits your pantry, and the model uses that to rank what you can cook tonight.
+
+## Ranking recipes
+
+Every recipe gets a score that blends four factors, so no single one can win on its own:
+
+- **Can you make it?** How much of the recipe you already have — this counts the most.
+- **Real overlap, not technicalities.** A 3-ingredient recipe shouldn't win just because you happen to have all three.
+- **Flavor fit.** Does the recipe's theme match the flavor profile your ingredients suggest?
+- **A rating you can trust.** Ratings are Bayesian-smoothed toward the global average, so one lucky 5-star review can't top the list.
+
+You can also filter by **vegetarian / vegan**, force a **must-use** ingredient, or dial up **diversity** so the results aren't five variations of the same dish.
+
+---
+
+# 🔬 Methodology
+
+> A recipe is a **document**, an ingredient is a **word**, and a cuisine or flavor is a latent
+> **topic** — so we model the corpus with **Latent Dirichlet Allocation (LDA)** and turn the learned
+> flavor topics into recommendations *that carry their own uncertainty*.
+
+The pipeline is three stages, and each makes one deliberate methodological choice. This is the
+reasoning behind [How it works](#the-idea); the per-stage deep dives (with the math) live in
+**[`yolo/README.md`](yolo/README.md)** and **[`model/README.md`](model/README.md)**.
+
+## Stage 1 · Data
+
+We build the corpus from the public [Food.com](https://www.kaggle.com/datasets/shuyangli94/food-com-recipes-and-user-interactions)
+dump (`RAW_recipes.csv` + `RAW_interactions.csv`) in [`data/prepare_data.py`](data/prepare_data.py):
+
+1. **Aggregate ratings** per recipe from the interactions file (streamed in chunks): a count
+   `n_ratings` and a weighted mean `avg_rating`.
+2. **Filter for signal** — keep recipes with **≥ 5 ratings** and **2–35 ingredients** (drop the
+   noise of one-liners and outliers). **53,573** recipes survive.
+3. **Canonicalize ingredients** — the methodological keystone. Free-text ingredient phrases are
+   lowercased, de-punctuated, stripped of generic modifiers (`fresh`, `ground`, `large`, …) and
+   singularized (`tomatoes → tomato`). The **same** `normalize_token` runs at data-prep time *and*
+   at query time, so the set-intersection that powers *coverage* (Stage 3) compares like with like.
+
+Output schema: `recipe_id, recipe_name, ingredients (JSON list), avg_rating, n_ratings`.
+
+## Stage 2 · Detection
+
+A **YOLOv5** detector fine-tuned on ingredients ([HuggingFace `HYUNAHKO/Ingredients_object_detection`](https://huggingface.co/HYUNAHKO/Ingredients_object_detection);
+95 classes whose vocabulary — *wakame, napa cabbage, kimchi, enoki / oyster / shiitake mushrooms,
+somen / udon / ramen* — is an Asian fridge-staples set) reads the photo. At inference ([`yolo/detect.py`](yolo/detect.py)) we run non-max suppression, keep
+the **highest-confidence box per class** above a confidence threshold (default `0.25`), and return
+`(label, confidence)` pairs.
+
+Detector labels (`Cherry_tomatoes`, `Green_bell_pepper`) are not recipe tokens, so
+[`yolo/build_mapping.py`](yolo/build_mapping.py) precomputes a **label → ingredient map** against the
+*actual* normalized vocabulary of the corpus, via a deterministic cascade:
+**exact match → head-noun → fuzzy (RapidFuzz `WRatio ≥ 90`) → leave unmapped**. 93 of the 95 classes
+map (to 87 distinct ingredients). Because the targets are drawn from the recipe vocabulary, a
+detected ingredient is guaranteed to line up with coverage. Full method, examples, and the honest
+mapping artifacts: **[`yolo/README.md`](yolo/README.md)**.
+
+## Stage 3 · Recommender
+
+The recommender rests on two modelling choices — **LDA** and a **Bayesian** treatment of it. Here's
+*why* each one, in plain terms. The equations and the step-by-step pipeline live in
+**[`model/README.md`](model/README.md)**.
+
+### Why LDA?
+
+We read cooking like language — a recipe is a *document*, an ingredient is a *word*, and a cuisine
+or flavor is a hidden *theme* (see [The idea](#the-idea)). Given that framing, a topic model like
+LDA is the natural fit, for three reasons:
+
+- **It finds flavor themes on its own.** Nobody hand-labels recipes as "Italian" or "baking"; LDA
+  discovers the themes from which ingredients tend to show up together — one leans on olive oil,
+  basil and parmesan, another on flour, sugar and eggs.
+- **It allows blends, not boxes.** A dish isn't forced into a single cuisine — it can be mostly
+  Italian with a hint of comfort food. That soft, mixed membership matches how real recipes taste,
+  where a hard one-label classifier would distort them.
+- **It stays readable.** Each theme is just its top ingredients, so you can *see* what the model
+  learned — unlike an opaque neural embedding. And it compresses thousands of sparse ingredients into
+  a handful of meaningful flavor dimensions, which turns "does this recipe match my pantry?" into a
+  real flavor question instead of brittle word-overlap.
+
+### Why Bayesian?
+
+Because the goal isn't only *which* recipes — it's *how sure we are*. A recommender that is
+confidently wrong is worse than one that admits when it's guessing.
+
+- **Your pantry is genuinely uncertain evidence.** From a few ingredients we infer a flavor profile,
+  and how sharp or fuzzy that profile is *is* the answer: a clearly-Italian pantry settles on one
+  theme (confident); a vague one — could be baking, could be breakfast — spreads across several
+  (uncertain). A Bayesian posterior captures that for free; a single best guess would hide it.
+- **It balances prior knowledge against your evidence.** With little to go on, the model leans on
+  what's common across all 53k recipes; the more ingredients you add, the more they take over. The
+  same instinct keeps ratings honest — a dish with one lucky 5-star vote is pulled toward the
+  average, so it can't out-rank a dish trusted by hundreds.
+- **The doubt reaches the final list.** Uncertainty isn't computed and thrown away — it travels all
+  the way into the ranking, so every recommendation can report how confident it is.
+
+---
+
+# 🚀 Getting started
+
+## Project structure
+
+<details>
+<summary>Click to expand the file tree</summary>
+
+```
+.
+├── app.py                        # Gradio web app  (photo → recipes)
+├── run_pipeline.py               # command line     (photo → recipes)
+├── data/                         # 1 · DATA
+│   └── prepare_data.py           #   download + clean Food.com → recipes_clean.csv
+├── yolo/                         # 2 · DETECT
+│   ├── detect.py                 #   run the YOLOv5 ingredient detector
+│   ├── build_mapping.py          #   map detector labels → recipe ingredients
+│   └── yolo_mapping.py           #   apply that mapping at query time
+├── model/                        # 3 · RECOMMEND   → model/README.md
+│   ├── src/recipe_recommender.py #   the recommender (train + recommend)
+│   ├── notebooks/                #   walkthrough + a usage example
+│   └── figures/                  #   the plots shown above
+├── samples/                      # example fridge / ingredient photos
+├── requirements.txt
+└── LICENSE                       # MIT
+```
+
+> **Run everything from the project root** (e.g. `python run_pipeline.py ...`). The recipe CSV, the trained model, and the detector weights are large/regenerable and gitignored — the steps below create them.
+
+</details>
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+git clone https://github.com/ultralytics/yolov5 yolo/yolov5   # detector backend (once)
+```
+
+Put the trained detector weights at `yolo/weights/best.pt`. *(No detector? The recommender still works — just type your ingredients instead of uploading a photo.)*
+
+## Usage
+
+**Web app** — upload a fridge photo (or pick one from `samples/`); detection and recommendations run automatically.
+
+```bash
+python app.py        # → http://127.0.0.1:7860
+```
+
+**Command line**
+
+```bash
+python run_pipeline.py --image samples/fridge.jpg --top-n 5 --diet vegetarian
+```
+
+<details>
+<summary>First-time setup — build the data, model, and label map</summary>
+
+```bash
+python data/prepare_data.py     # → data/recipes_clean.csv
+python model/src/run_demo.py    # → trains the recommender (model/models/lda_model.pkl)
+python yolo/build_mapping.py    # → yolo/yolo_vocab_mapping.json
+```
+
+</details>
+
+---
+
+# 👥 Project info
+
+## Authors
+
+| Name | | Name |
+|------|--|------|
+| Qixin Cui | | Kevin Fan |
+| Yizhuo Li | | Elaine Wang |
+| Zhetao Zhang | | |
+
+## Acknowledgments
+
+- [Food.com Recipes & Interactions](https://www.kaggle.com/datasets/shuyangli94/food-com-recipes-and-user-interactions) — the recipe corpus.
+- [Ultralytics Yolov5](https://github.com/ultralytics/yolov5) — used as the ingredient-detector backbone.
+- [Ingredient Object Detection Model](https://huggingface.co/HYUNAHKO/Ingredients_object_detection) — used as the pre-trained ingredient detection model checkpoint (`best.pt`).
+- Built with [scikit-learn](https://scikit-learn.org/), [Gradio](https://www.gradio.app/), and [PyTorch](https://pytorch.org/).
+
+## License
+
+Released under the [MIT License](LICENSE). The recipe data comes from the public Food.com dataset and is used for study and research only.
