@@ -30,3 +30,13 @@ yolo/yolov5/
 model/models/*.pkl
 
 # (model/figures/*.png ARE committed: small, needed for the README to render)
+
+# Added by course staff: virtual environments, and the Food.com download if it is saved
+# here (its files are "© Original Authors" and must not be committed; see data/README.md)
+.venv/
+venv/
+data/*.zip
+data/RAW_*.csv
+data/PP_*.csv
+data/interactions_*.csv
+data/ingr_map.pkl
